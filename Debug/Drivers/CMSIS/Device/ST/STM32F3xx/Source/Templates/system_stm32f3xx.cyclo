@@ -1,0 +1,2 @@
+../Drivers/CMSIS/Device/ST/STM32F3xx/Source/Templates/system_stm32f3xx.c:170:6:SystemInit	1
+../Drivers/CMSIS/Device/ST/STM32F3xx/Source/Templates/system_stm32f3xx.c:219:6:SystemCoreClockUpdate	6

@@ -1,0 +1,10 @@
+../Core/Src/hx711.c:4:20:_delay_us	24	static,ignoring_inline_asm
+../Core/Src/hx711.c:9:6:hx711_init	24	static
+../Core/Src/hx711.c:29:9:hx711_is_ready	16	static
+../Core/Src/hx711.c:34:9:hx711_read_raw	40	static
+../Core/Src/hx711.c:68:9:hx711_read_average	56	static
+../Core/Src/hx711.c:76:6:hx711_tare	16	static
+../Core/Src/hx711.c:80:7:hx711_get_units	24	static
+../Core/Src/hx711.c:85:6:hx711_set_scale	16	static
+../Core/Src/hx711.c:89:6:hx711_power_down	16	static
+../Core/Src/hx711.c:95:6:hx711_power_up	16	static
