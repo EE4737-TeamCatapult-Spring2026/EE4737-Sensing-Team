@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include "hx711.h"
+#include "hts221.h"
 
 /* USER CODE END Includes */
 
@@ -43,11 +44,11 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
+ADC_HandleTypeDef hadc1, hadc2;
 
 /* USER CODE BEGIN PV */
-HX711 scale;
+HX711 strainScale;
+HTS221_HandleTypeDef humiditySensor;
 
 /* USER CODE END PV */
 
@@ -55,7 +56,6 @@ HX711 scale;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -95,8 +95,24 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
+  MX_SPI1_Init();
+
+  /* Temporary sanity check — read WHO_AM_I directly */
+  uint8_t addr = 0x0F | 0x80;   /* reg 0x0F, RW bit set */
+  uint8_t whoami = 0;
+
+  __HAL_SPI_1LINE_TX(&hspi1);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);  /* CS low */
+  HAL_SPI_Transmit(&hspi1, &addr, 1, 100);
+  __HAL_SPI_1LINE_RX(&hspi1);
+  HAL_SPI_Receive(&hspi1, &whoami, 1, 100);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);    /* CS high */
+  __HAL_SPI_1LINE_TX(&hspi1);
+
+  /* whoami should be 0xBC — check this in the debugger */
+
   /* USER CODE BEGIN 2 */
+
   uint32_t adc_therm_1 = 0u;
   uint32_t adc_therm_2 = 0u;
   float therm_1_volt = 0.0f;
@@ -112,21 +128,24 @@ int main(void)
   float volt_per_bit = therm_ref_volt/(float)adc_max_range; //conversion for bits to volts
 
   // Configure CLK and Data pins
-  hx711_init(&scale, GPIOA, GPIO_PIN_11,   // CLK
+  hx711_init(&strainScale, GPIOA, GPIO_PIN_11,   // CLK
                           GPIOA, GPIO_PIN_8,   // DAT
                           HX711_GAIN_A_128);
 
+  // Initialize HTS221
+  HTS221_Init(&humiditySensor, &hspi1);
+
   // Tare channel A
-  scale.gain = HX711_GAIN_A_128;
-  hx711_read_raw(&scale);  // dummy to arm channel A
-  hx711_tare(&scale, 10);
-  int32_t offsetA = scale.offset;  // save channel A offset
+  strainScale.gain = HX711_GAIN_A_128;
+  hx711_read_raw(&strainScale);  // dummy to arm channel A
+  hx711_tare(&strainScale, 10);
+  int32_t offsetA = strainScale.offset;  // save channel A offset
 
   // Tare channel B
-  scale.gain = HX711_GAIN_B_32;
-  hx711_read_raw(&scale);  // dummy to arm channel B
-  hx711_tare(&scale, 10);
-  int32_t offsetB = scale.offset;  // save channel B offset
+  strainScale.gain = HX711_GAIN_B_32;
+  hx711_read_raw(&strainScale);  // dummy to arm channel B
+  hx711_tare(&strainScale, 10);
+  int32_t offsetB = strainScale.offset;  // save channel B offset
 
   volatile float weightA, weightB = 0.0f;
 
@@ -157,18 +176,24 @@ int main(void)
 	 T_therm_2 = -21.8f * logf(R_therm_2) + 228.29f;
 
 	 // --- GPIO: Strain Gauges ---
-	 scale.gain = HX711_GAIN_A_128;
-	 hx711_set_scale(&scale, STRAIN_A_LBS); // Calibrated to pounds
-	 scale.offset = offsetA;
-	 hx711_read_raw(&scale);          // dummy read to set channel A for next read
-	 weightA = hx711_get_units(&scale, 5);
+	 strainScale.gain = HX711_GAIN_A_128;
+	 hx711_set_scale(&strainScale, STRAIN_A_LBS); // Calibrated to pounds
+	 strainScale.offset = offsetA;
+	 hx711_read_raw(&strainScale);          // dummy read to set channel A for next read
+	 weightA = hx711_get_units(&strainScale, 5);
 
-	 scale.gain = HX711_GAIN_B_32;
-	 hx711_set_scale(&scale, STRAIN_B_LBS); // Calibrated to pounds
-	 scale.offset = offsetB;
-	 hx711_read_raw(&scale);          // dummy read to set channel B for next read
-	 weightB = hx711_get_units(&scale, 5);
+	 strainScale.gain = HX711_GAIN_B_32;
+	 hx711_set_scale(&strainScale, STRAIN_B_LBS); // Calibrated to pounds
+	 strainScale.offset = offsetB;
+	 hx711_read_raw(&strainScale);          // dummy read to set channel B for next read
+	 weightB = hx711_get_units(&strainScale, 5);
+
+	 // --- GPIO: Humidity Sensor
+	 HTS221_Read(&humiditySensor);
+
+	 // END OF LOOP
 	 HAL_Delay(1000);
+
   }
   /* USER CODE END 3 */
 }
@@ -285,63 +310,6 @@ static void MX_ADC1_Init(void)
 }
 
 /**
-  * @brief ADC2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-
-  /* USER CODE BEGIN ADC2_Init 0 */
-
-  /* USER CODE END ADC2_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC2_Init 1 */
-
-  /* USER CODE END ADC2_Init 1 */
-
-  /** Common config
-  */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc2.Init.LowPowerAutoWait = DISABLE;
-  hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_2;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SingleDiff = ADC_SINGLE_ENDED;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
-  sConfig.OffsetNumber = ADC_OFFSET_NONE;
-  sConfig.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC2_Init 2 */
-
-  /* USER CODE END ADC2_Init 2 */
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -356,9 +324,13 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|GPIO_PIN_11, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : VCP_TX_Pin VCP_RX_Pin */
   GPIO_InitStruct.Pin = VCP_TX_Pin|VCP_RX_Pin;
@@ -368,18 +340,45 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : PA4 PA11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PA8 */
   GPIO_InitStruct.Pin = GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA11 */
-  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  /*Configure GPIO pin : PB3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
