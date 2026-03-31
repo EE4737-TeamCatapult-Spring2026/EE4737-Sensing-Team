@@ -257,6 +257,9 @@ static void fetch_humidity_calibration(HTS221_HandleTypeDef *dev)
 static float apply_temp_correction(const HTS221_HandleTypeDef *dev,
                                    int16_t raw)
 {
+	 int16_t denom = dev->T1_OUT - dev->T0_OUT;
+	 if (denom == 0) return -999.0f;   // sentinel — means cal read failed
+
     return (float)(raw - dev->T0_OUT)
            * (float)((int16_t)dev->T1 - (int16_t)dev->T0)
            / (float)(dev->T1_OUT - dev->T0_OUT)
@@ -272,6 +275,9 @@ static float apply_temp_correction(const HTS221_HandleTypeDef *dev,
 static float apply_humidity_correction(const HTS221_HandleTypeDef *dev,
                                        int16_t raw)
 {
+	int16_t denom = dev->H1_T0_OUT - dev->H0_T0_OUT;
+	if (denom == 0) return -999.0f;   // sentinel
+
     float h_span = ((float)(int16_t)dev->H1 - (float)(int16_t)dev->H0) / 2.0f;
     float h_temp = (float)(raw - dev->H0_T0_OUT)
                    * h_span

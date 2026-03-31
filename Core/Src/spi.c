@@ -19,9 +19,9 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_SPI1_CLK_ENABLE();
 
-    /* PB3 (SCK) and PB5 (MOSI/SDA) — assigning AF5 releases them
+    /* PB3 (SCK), PB4 (MISO/SDA), and PB5 (MOSI/SDA) — assigning AF5 releases them
        from their JTAG reset-state function automatically on the F3 */
-    gpio.Pin       = GPIO_PIN_3 | GPIO_PIN_5;
+    gpio.Pin       = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
     gpio.Mode      = GPIO_MODE_AF_PP;
     gpio.Pull      = GPIO_NOPULL;
     gpio.Speed     = GPIO_SPEED_FREQ_HIGH;

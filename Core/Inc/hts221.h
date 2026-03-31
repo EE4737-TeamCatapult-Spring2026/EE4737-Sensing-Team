@@ -48,10 +48,10 @@
 
 /* ── CS pin — edit to match your PCB ──────────────────────────────────────── */
 #ifndef HTS221_CS_PORT
-  #define HTS221_CS_PORT   GPIOB
+  #define HTS221_CS_PORT   GPIOA
 #endif
 #ifndef HTS221_CS_PIN
-  #define HTS221_CS_PIN    GPIO_PIN_6
+  #define HTS221_CS_PIN    GPIO_PIN_4
 #endif
 
 /* ── SPI timeout ──────────────────────────────────────────────────────────── */
