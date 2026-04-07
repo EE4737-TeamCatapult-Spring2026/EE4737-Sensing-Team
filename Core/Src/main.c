@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <math.h>
+#include <string.h>
 #include "hx711.h"
 #include "hts221.h"
 
@@ -36,6 +37,9 @@
 /* USER CODE BEGIN PD */
 #define STRAIN_A_LBS 13956.6f
 #define STRAIN_B_LBS 3489.15f
+
+#define SLAVE_RX_BUFFER_SIZE  32
+#define SLAVE_TX_BUFFER_SIZE  32
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,11 +48,19 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1, hadc2;
+ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
+
+I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
 HX711 strainScale;
 HTS221_HandleTypeDef humiditySensor;
+
+
+uint8_t rxBuffer[SLAVE_RX_BUFFER_SIZE];
+uint8_t txBuffer[SLAVE_TX_BUFFER_SIZE];
+volatile uint8_t newPacketReceived = 0;
 
 /* USER CODE END PV */
 
@@ -56,8 +68,10 @@ HTS221_HandleTypeDef humiditySensor;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-
+void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_t power);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -95,30 +109,24 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
+  MX_ADC2_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+
+  // Initialize SPI comms
   MX_SPI1_Init();
 
-  /* Temporary sanity check — read WHO_AM_I directly */
-  uint8_t addr = 0x0F | 0x80;   /* reg 0x0F, RW bit set */
-  uint8_t whoami = 0;
+  // Enables the interrupt-driven listener to loaf
+  HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
 
-  __HAL_SPI_1LINE_TX(&hspi1);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);  /* CS low */
-  HAL_SPI_Transmit(&hspi1, &addr, 1, 100);
-  __HAL_SPI_1LINE_RX(&hspi1);
-  HAL_SPI_Receive(&hspi1, &whoami, 1, 100);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);    /* CS high */
-  __HAL_SPI_1LINE_TX(&hspi1);
-
-  /* whoami should be 0xBC — check this in the debugger */
-
+  // Initialize thermistor variables
   uint32_t adc_therm_1 = 0u;
   uint32_t adc_therm_2 = 0u;
   float therm_1_volt = 0.0f;
   float therm_2_volt = 0.0f;
   uint16_t adc_max_range = 4095;
   float therm_ref_volt = 3.3f;
-  uint16_t R2 = 50000;
+  uint16_t R2 = 51000;
   float R_therm_1 = 0.0f;
   float R_therm_2 = 0.0f;
   float T_therm_1 = 0.0f;
@@ -134,18 +142,19 @@ int main(void)
   // Initialize HTS221
   HTS221_Init(&humiditySensor, &hspi1);
 
-  // Tare channel A
+  // Tare channel A strain gauge
   strainScale.gain = HX711_GAIN_A_128;
   hx711_read_raw(&strainScale);  // dummy to arm channel A
   hx711_tare(&strainScale, 10);
   int32_t offsetA = strainScale.offset;  // save channel A offset
 
-  // Tare channel B
+  // Tare channel B strain gauge
   strainScale.gain = HX711_GAIN_B_32;
   hx711_read_raw(&strainScale);  // dummy to arm channel B
   hx711_tare(&strainScale, 10);
   int32_t offsetB = strainScale.offset;  // save channel B offset
 
+  // Initialize strain gauge values
   volatile float weightA, weightB = 0.0f;
 
   /* USER CODE END 2 */
@@ -158,12 +167,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  // --- ADC2: Thermistor 1 on IN4 ---
+	  // --- ADC1: Thermistor 1 on IN4 ---
 	 HAL_ADC_Start(&hadc1);
 	 HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
 	 adc_therm_1 = HAL_ADC_GetValue(&hadc1);
 	 therm_1_volt = volt_per_bit * adc_therm_1;
 	 R_therm_1 = (therm_ref_volt * R2 / therm_1_volt) - R2;
+
+	 // Final Temp for Thermistor 1
 	 T_therm_1 = -21.8f * logf(R_therm_1) + 228.29f;
 
 	 // --- ADC2: Thermistor 2 on IN2 ---
@@ -172,6 +183,8 @@ int main(void)
 	 adc_therm_2 = HAL_ADC_GetValue(&hadc2);
 	 therm_2_volt = volt_per_bit * adc_therm_2;
 	 R_therm_2 = (therm_ref_volt * R2 / therm_2_volt) - R2;
+
+	 // Final Temp for Thermistor 2
 	 T_therm_2 = -21.8f * logf(R_therm_2) + 228.29f;
 
 	 // --- GPIO: Strain Gauges ---
@@ -179,16 +192,33 @@ int main(void)
 	 hx711_set_scale(&strainScale, STRAIN_A_LBS); // Calibrated to pounds
 	 strainScale.offset = offsetA;
 	 hx711_read_raw(&strainScale);          // dummy read to set channel A for next read
+
+	 // Final Strain for Gauge 1
 	 weightA = hx711_get_units(&strainScale, 5);
 
 	 strainScale.gain = HX711_GAIN_B_32;
 	 hx711_set_scale(&strainScale, STRAIN_B_LBS); // Calibrated to pounds
 	 strainScale.offset = offsetB;
 	 hx711_read_raw(&strainScale);          // dummy read to set channel B for next read
+
+	 // Final Strain for Gauge 2
 	 weightB = hx711_get_units(&strainScale, 5);
 
-	 // --- GPIO: Humidity Sensor
+	 // --- GPIO: Humidity Sensor ---
+	 // Data stored in humiditySensor.humidity and humiditySensor.temperature
 	 HTS221_Read(&humiditySensor);
+
+	 // Process collected data via averaging values
+	uint32_t avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
+	uint32_t avgStrain = (weightA + weightB) / 2;
+
+
+	 // Check for I2C packet from loaf
+	 if (newPacketReceived)
+	 {
+		 // TODO: Add sensing code!
+		 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, 0xDEAD);
+	 }
 
 	 // END OF LOOP
 	 HAL_Delay(1000);
@@ -234,8 +264,9 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC12;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_I2C1|RCC_PERIPHCLK_ADC12;
   PeriphClkInit.Adc12ClockSelection = RCC_ADC12PLLCLK_DIV1;
+  PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
@@ -309,6 +340,111 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Common config
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.LowPowerAutoWait = DISABLE;
+  hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x00201D2B;
+  hi2c1.Init.OwnAddress1 = 0x20;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -346,12 +482,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
   /*Configure GPIO pin : PA8 */
   GPIO_InitStruct.Pin = GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -379,6 +509,58 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_t power)
+{
+	// Populate TX buffer with sensor data
+	// Done in order TEMP HUMIDITY STRAIN POWER
+	bzero(txBuffer, SLAVE_TX_BUFFER_SIZE);
+	memcpy(&txBuffer[0], &temp, sizeof(temp));
+	memcpy(&txBuffer[4], &humidity, sizeof(humidity));
+	memcpy(&txBuffer[8], &strain, sizeof(strain));
+	memcpy(&txBuffer[12], &power, sizeof(power));
+
+	// Transmit buffer data, reset newPacketReceived
+	HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE);
+	newPacketReceived = 0;
+	return;
+}
+
+/**
+ * Called when the slave has finished RECEIVING data from master.
+ * Re-arm for the next receive, and set a flag for main loop processing.
+ */
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        newPacketReceived = 1;
+
+        // Re-arm for next packet
+        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+    }
+}
+
+/**
+ * Called when the slave has finished TRANSMITTING data to master.
+ * Re-arm the receiver to listen for the next command.
+ */
+void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        // Re-arm to receive the next request
+        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+    }
+}
+
+/**
+ * Called on I2C error (bus error, arbitration loss, timeout, etc.)
+ */
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        // Reset and re-arm — common for ARLO or BERR recovery
+        HAL_I2C_DeInit(hi2c);
+        HAL_I2C_Init(hi2c);
+        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+    }
+}
 
 /* USER CODE END 4 */
 
