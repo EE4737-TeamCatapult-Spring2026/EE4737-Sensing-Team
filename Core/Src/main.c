@@ -30,7 +30,8 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef enum {OK, BUSY, SENSING_ERROR} SensingStatus;
+typedef enum {NoError, ThermistorError, CurrentSensorError, HumiditySensorError, StrainGaugeError, FrozenPipeRisk, HardFault} SensingErrorStatus;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -40,6 +41,9 @@
 
 #define SLAVE_RX_BUFFER_SIZE  32
 #define SLAVE_TX_BUFFER_SIZE  32
+
+#define STATUS_RQ 0x01
+#define INFO_RQ 0x02
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -57,11 +61,14 @@ I2C_HandleTypeDef hi2c1;
 HX711 strainScale;
 HTS221_HandleTypeDef humiditySensor;
 
-
 uint8_t rxBuffer[SLAVE_RX_BUFFER_SIZE];
 uint8_t txBuffer[SLAVE_TX_BUFFER_SIZE];
 volatile uint8_t newPacketReceived = 0;
 
+// Initialize error status variables
+// Setup is incomplete, so the slice is busy until a first round of data is collected
+SensingStatus sensingSliceStatus = BUSY;
+SensingErrorStatus errorStatus = NoError;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -157,6 +164,9 @@ int main(void)
   // Initialize strain gauge values
   volatile float weightA, weightB = 0.0f;
 
+  // Setup complete, set sensing slice status as OK
+  sensingSliceStatus = OK;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -216,7 +226,7 @@ int main(void)
 	 // Check for I2C packet from loaf
 	 if (newPacketReceived)
 	 {
-		 // TODO: Add sensing code!
+		 // TODO: Add sensing code for current!
 		 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, 0xDEAD);
 	 }
 
@@ -512,13 +522,33 @@ static void MX_GPIO_Init(void)
 
 void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_t power)
 {
-	// Populate TX buffer with sensor data
-	// Done in order TEMP HUMIDITY STRAIN POWER
-	bzero(txBuffer, SLAVE_TX_BUFFER_SIZE);
-	memcpy(&txBuffer[0], &temp, sizeof(temp));
-	memcpy(&txBuffer[4], &humidity, sizeof(humidity));
-	memcpy(&txBuffer[8], &strain, sizeof(strain));
-	memcpy(&txBuffer[12], &power, sizeof(power));
+	// Read received packet and determine what is being requested
+	uint8_t rqType = rxBuffer[0];
+
+	switch(rqType)
+	{
+	case STATUS_RQ:
+		// Populate TX buffer with status
+		bzero(txBuffer, SLAVE_TX_BUFFER_SIZE);
+		memcpy(&txBuffer[0], &sensingSliceStatus, sizeof(sensingSliceStatus));
+
+		// If in error status, concatenate the error being experienced
+		if(sensingSliceStatus == SENSING_ERROR)
+		{
+			memcpy(&txBuffer[1], &errorStatus, sizeof(errorStatus));
+		}
+		break;
+
+	case INFO_RQ:
+		// Populate TX buffer with sensor data
+		// Done in order TEMP HUMIDITY STRAIN POWER
+		bzero(txBuffer, SLAVE_TX_BUFFER_SIZE);
+		memcpy(&txBuffer[0], &temp, sizeof(temp));
+		memcpy(&txBuffer[4], &humidity, sizeof(humidity));
+		memcpy(&txBuffer[8], &strain, sizeof(strain));
+		memcpy(&txBuffer[12], &power, sizeof(power));
+		break;
+	}
 
 	// Transmit buffer data, reset newPacketReceived
 	HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE);
@@ -573,8 +603,14 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  sensingSliceStatus = SENSING_ERROR;
+  errorStatus = HardFault;
   while (1)
   {
+	  if (newPacketReceived)
+	  	 {
+	  		 ProcessI2CPacket(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
+	  	 }
   }
   /* USER CODE END Error_Handler_Debug */
 }
