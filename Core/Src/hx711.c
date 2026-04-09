@@ -33,7 +33,7 @@ uint8_t hx711_is_ready(HX711 *hx) {
 
 int32_t hx711_read_raw(HX711 *hx) {
     // Wait until DOUT goes low (data ready), with a simple timeout
-    uint32_t timeout = 1000000;
+    uint32_t timeout = 10000;
     while (!hx711_is_ready(hx)) {
         if (--timeout == 0) return 0;  // return 0 on timeout
     }

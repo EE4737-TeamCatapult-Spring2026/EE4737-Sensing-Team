@@ -31,7 +31,8 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef enum {OK, BUSY, SENSING_ERROR} SensingStatus;
-typedef enum {NoError, ThermistorError, CurrentSensorError, HumiditySensorError, StrainGaugeError, FrozenPipeRisk, HardFault} SensingErrorStatus;
+typedef enum {NoError, ThermistorError, CurrentSensorError, HumiditySensorError, StrainGaugeError, HardFault} SensingErrorStatus;
+typedef enum {NoRisk, FrozenPipeRisk, RoofStrainRisk, BothRisks} RiskStatus;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -39,8 +40,8 @@ typedef enum {NoError, ThermistorError, CurrentSensorError, HumiditySensorError,
 #define STRAIN_A_LBS 13956.6f
 #define STRAIN_B_LBS 3489.15f
 
-#define SLAVE_RX_BUFFER_SIZE  32
-#define SLAVE_TX_BUFFER_SIZE  32
+#define SLAVE_RX_BUFFER_SIZE  1
+#define SLAVE_TX_BUFFER_SIZE  16
 
 #define STATUS_RQ 0x01
 #define INFO_RQ 0x02
@@ -65,10 +66,14 @@ uint8_t rxBuffer[SLAVE_RX_BUFFER_SIZE];
 uint8_t txBuffer[SLAVE_TX_BUFFER_SIZE];
 volatile uint8_t newPacketReceived = 0;
 
-// Initialize error status variables
+// Strain gauge offset variables
+float offsetA, offsetB = 0.0f;
+
+// Initialize error/risk status variables
 // Setup is incomplete, so the slice is busy until a first round of data is collected
 SensingStatus sensingSliceStatus = BUSY;
 SensingErrorStatus errorStatus = NoError;
+RiskStatus riskStatus = NoRisk;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,7 +83,9 @@ static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_t power);
+void ProcessI2CPacket(float temp, float humidity, float strain, float power);
+void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float power);
+void RiskCheck(float temp, float humidity, float strain);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -153,16 +160,16 @@ int main(void)
   strainScale.gain = HX711_GAIN_A_128;
   hx711_read_raw(&strainScale);  // dummy to arm channel A
   hx711_tare(&strainScale, 10);
-  int32_t offsetA = strainScale.offset;  // save channel A offset
+  offsetA = strainScale.offset;  // save channel A offset
 
   // Tare channel B strain gauge
   strainScale.gain = HX711_GAIN_B_32;
   hx711_read_raw(&strainScale);  // dummy to arm channel B
   hx711_tare(&strainScale, 10);
-  int32_t offsetB = strainScale.offset;  // save channel B offset
+  offsetB = strainScale.offset;  // save channel B offset
 
   // Initialize strain gauge values
-  volatile float weightA, weightB = 0.0f;
+  volatile float strainA, strainB = 0.0f;
 
   // Setup complete, set sensing slice status as OK
   sensingSliceStatus = OK;
@@ -204,7 +211,7 @@ int main(void)
 	 hx711_read_raw(&strainScale);          // dummy read to set channel A for next read
 
 	 // Final Strain for Gauge 1
-	 weightA = hx711_get_units(&strainScale, 5);
+	 strainA = hx711_get_units(&strainScale, 5);
 
 	 strainScale.gain = HX711_GAIN_B_32;
 	 hx711_set_scale(&strainScale, STRAIN_B_LBS); // Calibrated to pounds
@@ -212,16 +219,20 @@ int main(void)
 	 hx711_read_raw(&strainScale);          // dummy read to set channel B for next read
 
 	 // Final Strain for Gauge 2
-	 weightB = hx711_get_units(&strainScale, 5);
+	 strainB = hx711_get_units(&strainScale, 5);
 
 	 // --- GPIO: Humidity Sensor ---
 	 // Data stored in humiditySensor.humidity and humiditySensor.temperature
 	 HTS221_Read(&humiditySensor);
 
 	 // Process collected data via averaging values
-	uint32_t avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
-	uint32_t avgStrain = (weightA + weightB) / 2;
+	 float avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
+	 float avgStrain = (strainA + strainB) / 2;
 
+	 // Perform checks for sensor errors and risks
+	 // TODO: Add sensing code for current!
+	 SensorErrorCheck(T_therm_1, T_therm_2, humiditySensor.humidity, strainA, strainB, 0xDEAD);
+	 RiskCheck(avgTemp, humiditySensor.humidity, avgStrain);
 
 	 // Check for I2C packet from loaf
 	 if (newPacketReceived)
@@ -231,7 +242,7 @@ int main(void)
 	 }
 
 	 // END OF LOOP
-	 HAL_Delay(1000);
+	 HAL_Delay(100);
 
   }
   /* USER CODE END 3 */
@@ -520,7 +531,8 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_t power)
+// Process an incoming packet from the GUI and send the expected response
+void ProcessI2CPacket(float temp, float humidity, float strain, float power)
 {
 	// Read received packet and determine what is being requested
 	uint8_t rqType = rxBuffer[0];
@@ -537,6 +549,15 @@ void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_
 		{
 			memcpy(&txBuffer[1], &errorStatus, sizeof(errorStatus));
 		}
+
+		// If at risk, concatenate the risk being experienced
+		if(riskStatus != NoRisk)
+		{
+			memcpy(&txBuffer[2], &riskStatus, sizeof(riskStatus));
+		}
+
+		// Transmit packet data
+		HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE / 2);
 		break;
 
 	case INFO_RQ:
@@ -547,13 +568,120 @@ void ProcessI2CPacket(uint32_t temp, uint32_t humidity, uint32_t strain, uint32_
 		memcpy(&txBuffer[4], &humidity, sizeof(humidity));
 		memcpy(&txBuffer[8], &strain, sizeof(strain));
 		memcpy(&txBuffer[12], &power, sizeof(power));
+
+		// Transmit packet data
+		HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE);
 		break;
 	}
 
-	// Transmit buffer data, reset newPacketReceived
-	HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE);
+	// Reset newPacketReceived
 	newPacketReceived = 0;
 	return;
+}
+
+/**
+ * Performs a 'sanity' check on sensors and their outputted values
+ * If any condition is met, the errorStatus and sensingSliceStatus variables are updated
+ * Note that only one type of error can be reported at a time!
+ */
+void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float power)
+{
+	// Delay to allow sensors to write values to variables
+	HAL_Delay(100);
+
+	// Thermistor Error Check
+	// When unplugged, thermistors report values of about -48 degrees C
+	if((temp1 < -30) || (temp2 < -30))
+	{
+		errorStatus = ThermistorError;
+	}
+	else
+	{
+		errorStatus = NoError;
+	}
+
+	// Current Sensor Error Check
+	// If current is reported to be <= 0, chances of misconfiguration are high
+	// TODO: Find conditions!
+
+	// Humidity Sensor Error Check
+	// If humidity values do not change on new read, HTS221 is not reading new values
+	float oldHumidity = humidity;
+	HTS221_Read(&humiditySensor);
+	float newHumidity = humiditySensor.humidity;
+	if(newHumidity - oldHumidity == 0)
+	{
+		errorStatus = HumiditySensorError;
+	}
+	else
+	{
+		errorStatus = NoError;
+	}
+
+	// Strain Gauge Error Check
+	// If values do not change on new read, HX711 is not reading new values
+	 strainScale.gain = HX711_GAIN_A_128;
+	 hx711_set_scale(&strainScale, STRAIN_A_LBS); // Calibrated to pounds
+	 strainScale.offset = offsetA;
+	 hx711_read_raw(&strainScale);          // dummy read to set channel A for next read
+
+	 //Strain for Gauge 1
+	 float newStrainA = hx711_get_units(&strainScale, 5);
+
+	 strainScale.gain = HX711_GAIN_B_32;
+	 hx711_set_scale(&strainScale, STRAIN_B_LBS); // Calibrated to pounds
+	 strainScale.offset = offsetB;
+	 hx711_read_raw(&strainScale);          // dummy read to set channel B for next read
+
+	 //Strain for Gauge 2
+	 float newStrainB = hx711_get_units(&strainScale, 5);
+
+	 if((newStrainA - strainA == 0) || (newStrainB - strainB == 0))
+	 {
+	 	 errorStatus = StrainGaugeError;
+	 }
+     else
+	 {
+	 	 errorStatus = NoError;
+	 }
+}
+
+/**
+ * Checks if any risk conditions have been met based on data given
+ * If any condition is met, the riskStatus and sensingSliceStatus variables are updated
+ */
+void RiskCheck(float temp, float humidity, float strain)
+{
+	// Frozen Pipe Risk check
+	// Conditions based off of that water freezes at or below 0 deg. C
+	// And that leaking/bursting pipes increase humidity, about 60% according to EPA
+	if(((temp <= 0) && (humidity >= 0.6f)) && !((errorStatus == ThermistorError) || (errorStatus == HumiditySensorError)))
+	{
+		riskStatus |= FrozenPipeRisk;
+	}
+	else
+	{
+		riskStatus &= !FrozenPipeRisk;
+	}
+
+	// Roof Strain Risk check
+	// According to GAF Roofing, roofs can withstand 20 lbs/ft^2
+	// Strain gauges are 1.2cm x 7.5cm = 0.00968752 ft^2, which is 0.1937504 lbs per gauge
+	// Thus we assume risk occurs at approx. 0.25 lbs per gauge
+	// Strain can be negative - for this check, we will take the magnitude
+	if(strain < 0)
+	{
+		strain = strain * -1;
+	}
+
+	if(strain >= 0.25f && !(errorStatus == StrainGaugeError))
+	{
+		riskStatus |= RoofStrainRisk;
+	}
+	else
+	{
+		riskStatus &= !RoofStrainRisk;
+	}
 }
 
 /**
