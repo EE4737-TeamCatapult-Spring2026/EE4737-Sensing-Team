@@ -45,6 +45,9 @@ typedef enum {NoRisk, FrozenPipeRisk, RoofStrainRisk, BothRisks} RiskStatus;
 
 #define STATUS_RQ 0x01
 #define INFO_RQ 0x02
+
+#define SOLAR_V_REF 0.33f
+#define SOLAR_V_DIV_CONV 21
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -84,7 +87,7 @@ static void MX_ADC2_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 void ProcessI2CPacket(float temp, float humidity, float strain, float power);
-void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float power);
+void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float solar_v, float solar_i);
 void RiskCheck(float temp, float humidity, float strain);
 /* USER CODE END PFP */
 
@@ -146,7 +149,18 @@ int main(void)
   float T_therm_1 = 0.0f;
   float T_therm_2 = 0.0f;
 
+  // Initialize power sensor variables
+  float solar_current = 0.0f;
+  float solar_current_adc = 0.0f;
+  float solar_voltage = 0.0f;
+  float solar_voltage_adc = 0.0f;
+  float solar_sensitivity = (float)(25 * (10^-3));
+
+  // ADC and other value computation variables
   float volt_per_bit = therm_ref_volt/(float)adc_max_range; //conversion for bits to volts
+  float avgTemp = 0.0f;
+  float avgStrain = 0.0f;
+  float solar_power = 0.0f;
 
   // Configure CLK and Data pins
   hx711_init(&strainScale, GPIOA, GPIO_PIN_11,   // CLK
@@ -225,20 +239,29 @@ int main(void)
 	 // Data stored in humiditySensor.humidity and humiditySensor.temperature
 	 HTS221_Read(&humiditySensor);
 
-	 // Process collected data via averaging values
-	 float avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
-	 float avgStrain = (strainA + strainB) / 2;
+	 // --- ADC1: Solar Panel Current on IN3 ---
+//	 HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+//	 solar_current_adc = volt_per_bit * HAL_ADC_GetValue(&hadc1);
+//	 solar_current = (solar_current_adc - SOLAR_V_REF) / solar_sensitivity;
+
+	 // --- ADC2: Solar Panel Voltage on IN4 ---
+//	 HAL_ADC_PollForConversion(&hadc2, HAL_MAX_DELAY);
+//	 solar_voltage_adc = volt_per_bit * HAL_ADC_GetValue(&hadc2);
+//	 solar_voltage = solar_voltage_adc * SOLAR_V_DIV_CONV;
+
+	 // Process collected data (average temp and strain values, compute power)
+	 avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
+	 avgStrain = (strainA + strainB) / 2;
+//	 solar_power = solar_current * solar_voltage;
 
 	 // Perform checks for sensor errors and risks
-	 // TODO: Add sensing code for current!
-	 SensorErrorCheck(T_therm_1, T_therm_2, humiditySensor.humidity, strainA, strainB, 0xDEAD);
+	 SensorErrorCheck(T_therm_1, T_therm_2, humiditySensor.humidity, strainA, strainB, solar_voltage, solar_current);
 	 RiskCheck(avgTemp, humiditySensor.humidity, avgStrain);
 
 	 // Check for I2C packet from loaf
 	 if (newPacketReceived)
 	 {
-		 // TODO: Add sensing code for current!
-		 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, 0xDEAD);
+		 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, solar_power);
 	 }
 
 	 // END OF LOOP
@@ -488,14 +511,6 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : VCP_TX_Pin VCP_RX_Pin */
-  GPIO_InitStruct.Pin = VCP_TX_Pin|VCP_RX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
   /*Configure GPIO pins : PA4 PA11 */
   GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_11;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -508,6 +523,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : VCP_RX_Pin */
+  GPIO_InitStruct.Pin = VCP_RX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(VCP_RX_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PB3 */
   GPIO_InitStruct.Pin = GPIO_PIN_3;
@@ -584,7 +607,7 @@ void ProcessI2CPacket(float temp, float humidity, float strain, float power)
  * If any condition is met, the errorStatus and sensingSliceStatus variables are updated
  * Note that only one type of error can be reported at a time!
  */
-void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float power)
+void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float solar_v, float solar_i)
 {
 	// Delay to allow sensors to write values to variables
 	HAL_Delay(100);
@@ -594,6 +617,7 @@ void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, f
 	if((temp1 < -30) || (temp2 < -30))
 	{
 		errorStatus = ThermistorError;
+		return;
 	}
 	else
 	{
@@ -601,8 +625,16 @@ void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, f
 	}
 
 	// Current Sensor Error Check
-	// If current is reported to be <= 0, chances of misconfiguration are high
-	// TODO: Find conditions!
+	// If current or voltage is reported to be <= 0, chances of misconfiguration are high
+	if(solar_i <= 0 || solar_v <= 0)
+	{
+		errorStatus = CurrentSensorError;
+		return;
+	}
+	else
+	{
+		errorStatus = NoError;
+	}
 
 	// Humidity Sensor Error Check
 	// If humidity values do not change on new read, HTS221 is not reading new values
@@ -612,6 +644,7 @@ void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, f
 	if(newHumidity - oldHumidity == 0)
 	{
 		errorStatus = HumiditySensorError;
+		return;
 	}
 	else
 	{
@@ -639,6 +672,7 @@ void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, f
 	 if((newStrainA - strainA == 0) || (newStrainB - strainB == 0))
 	 {
 	 	 errorStatus = StrainGaugeError;
+	 	 return;
 	 }
      else
 	 {
@@ -655,7 +689,7 @@ void RiskCheck(float temp, float humidity, float strain)
 	// Frozen Pipe Risk check
 	// Conditions based off of that water freezes at or below 0 deg. C
 	// And that leaking/bursting pipes increase humidity, about 60% according to EPA
-	if(((temp <= 0) && (humidity >= 0.6f)) && !((errorStatus == ThermistorError) || (errorStatus == HumiditySensorError)))
+	if(((temp <= 0) || (humidity >= 0.6f)) && !((errorStatus == ThermistorError) || (errorStatus == HumiditySensorError)))
 	{
 		riskStatus |= FrozenPipeRisk;
 	}
@@ -671,7 +705,7 @@ void RiskCheck(float temp, float humidity, float strain)
 	// Strain can be negative - for this check, we will take the magnitude
 	if(strain < 0)
 	{
-		strain = strain * -1;
+		strain *= -1;
 	}
 
 	if(strain >= 0.25f && !(errorStatus == StrainGaugeError))
