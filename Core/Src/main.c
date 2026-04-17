@@ -42,12 +42,18 @@ typedef enum {NoRisk, FrozenPipeRisk, RoofStrainRisk, BothRisks} RiskStatus;
 
 #define SLAVE_RX_BUFFER_SIZE  1
 #define SLAVE_TX_BUFFER_SIZE  16
+#define SENSING_DELAY 100
 
 #define STATUS_RQ 0x01
 #define INFO_RQ 0x02
+#define RESET 0x03
+#define E_STOP 0x04
 
 #define SOLAR_V_REF 0.33f
-#define SOLAR_V_DIV_CONV 21
+#define SOLAR_V_DIV_CONV 21.0f
+#define SOLAR_V_OFFSET 1.0f
+#define SOLAR_RESISTANCE 210000
+#define OP_AMP_SCALE 51
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -67,7 +73,7 @@ HTS221_HandleTypeDef humiditySensor;
 
 uint8_t rxBuffer[SLAVE_RX_BUFFER_SIZE];
 uint8_t txBuffer[SLAVE_TX_BUFFER_SIZE];
-volatile uint8_t newPacketReceived = 0;
+//volatile uint8_t newPacketReceived = 0;
 
 // Strain gauge offset variables
 float offsetA, offsetB = 0.0f;
@@ -86,6 +92,7 @@ static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
+void ReconfigChannel(ADC_HandleTypeDef adc, uint32_t channel);
 void ProcessI2CPacket(float temp, float humidity, float strain, float power);
 void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float solar_v, float solar_i);
 void RiskCheck(float temp, float humidity, float strain);
@@ -134,6 +141,11 @@ int main(void)
   MX_SPI1_Init();
 
   // Enables the interrupt-driven listener to loaf
+//  if(HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
+//    {
+//      /* Transfer error in reception process */
+//      Error_Handler();
+//    }
   HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
 
   // Initialize thermistor variables
@@ -151,10 +163,10 @@ int main(void)
 
   // Initialize power sensor variables
   float solar_current = 0.0f;
-  float solar_current_adc = 0.0f;
+//  float solar_current_adc = 0.0f;
   float solar_voltage = 0.0f;
   float solar_voltage_adc = 0.0f;
-  float solar_sensitivity = (float)(25 * (10^-3));
+//  float solar_sensitivity = (float)(25 * (10^-3));
 
   // ADC and other value computation variables
   float volt_per_bit = therm_ref_volt/(float)adc_max_range; //conversion for bits to volts
@@ -199,7 +211,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
 	  // --- ADC1: Thermistor 1 on IN4 ---
-	 HAL_ADC_Start(&hadc1);
+	 ReconfigChannel(hadc1, ADC_CHANNEL_4);
 	 HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
 	 adc_therm_1 = HAL_ADC_GetValue(&hadc1);
 	 therm_1_volt = volt_per_bit * adc_therm_1;
@@ -209,7 +221,7 @@ int main(void)
 	 T_therm_1 = -21.8f * logf(R_therm_1) + 228.29f;
 
 	 // --- ADC2: Thermistor 2 on IN2 ---
-	 HAL_ADC_Start(&hadc2);
+	 ReconfigChannel(hadc2, ADC_CHANNEL_2);
 	 HAL_ADC_PollForConversion(&hadc2, HAL_MAX_DELAY);
 	 adc_therm_2 = HAL_ADC_GetValue(&hadc2);
 	 therm_2_volt = volt_per_bit * adc_therm_2;
@@ -239,33 +251,46 @@ int main(void)
 	 // Data stored in humiditySensor.humidity and humiditySensor.temperature
 	 HTS221_Read(&humiditySensor);
 
-	 // --- ADC1: Solar Panel Current on IN3 ---
-//	 HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-//	 solar_current_adc = volt_per_bit * HAL_ADC_GetValue(&hadc1);
+	 // --- ADC2: Solar Panel Current on IN3 ---
+//	 ReconfigChannel(hadc2, ADC_CHANNEL_3);
+//	 HAL_ADC_PollForConversion(&hadc2, HAL_MAX_DELAY);
+//	 solar_current_adc = volt_per_bit * HAL_ADC_GetValue(&hadc2) / OP_AMP_SCALE;
+
+//	 // Convert current ADC reading to proper scale
 //	 solar_current = (solar_current_adc - SOLAR_V_REF) / solar_sensitivity;
 
 	 // --- ADC2: Solar Panel Voltage on IN4 ---
-//	 HAL_ADC_PollForConversion(&hadc2, HAL_MAX_DELAY);
-//	 solar_voltage_adc = volt_per_bit * HAL_ADC_GetValue(&hadc2);
-//	 solar_voltage = solar_voltage_adc * SOLAR_V_DIV_CONV;
+	 ReconfigChannel(hadc2, ADC_CHANNEL_4);
+	 HAL_ADC_PollForConversion(&hadc2, HAL_MAX_DELAY);
+	 solar_voltage_adc = volt_per_bit * HAL_ADC_GetValue(&hadc2);
+
+	 // If no voltage ADC reading, return 0 volts
+	 if(solar_voltage_adc == 0)
+	 {
+		 solar_voltage = 0;
+	 }
+	 else // Else, convert voltage ADC reading to proper scale
+	 {
+		 solar_voltage = (solar_voltage_adc * SOLAR_V_DIV_CONV) + SOLAR_V_OFFSET;
+	 }
+
+	 // Compute current based off voltage
+	 solar_current = solar_voltage / SOLAR_RESISTANCE;
 
 	 // Process collected data (average temp and strain values, compute power)
 	 avgTemp = (T_therm_1 + T_therm_2 + humiditySensor.temperature) / 3;
 	 avgStrain = (strainA + strainB) / 2;
-//	 solar_power = solar_current * solar_voltage;
+	 solar_power =  solar_voltage * solar_current;
 
 	 // Perform checks for sensor errors and risks
 	 SensorErrorCheck(T_therm_1, T_therm_2, humiditySensor.humidity, strainA, strainB, solar_voltage, solar_current);
 	 RiskCheck(avgTemp, humiditySensor.humidity, avgStrain);
 
-	 // Check for I2C packet from loaf
-	 if (newPacketReceived)
-	 {
-		 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, solar_power);
-	 }
+	 // Send I2C packet to loaf
+	 ProcessI2CPacket(avgTemp, humiditySensor.humidity, avgStrain, solar_power);
 
 	 // END OF LOOP
-	 HAL_Delay(100);
+	 HAL_Delay(SENSING_DELAY);
 
   }
   /* USER CODE END 3 */
@@ -554,10 +579,41 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+// Reconfigure ADC channel for ADC readings
+void ReconfigChannel(ADC_HandleTypeDef adc, uint32_t channel)
+{
+
+	// Stop ADC
+	HAL_ADC_Stop(&adc);
+
+	// Update configuration to given channel
+	ADC_ChannelConfTypeDef sConfig = {0};
+
+	sConfig.Channel = channel;
+	sConfig.Rank = ADC_REGULAR_RANK_1;
+    sConfig.SingleDiff = ADC_SINGLE_ENDED;
+    sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+    sConfig.OffsetNumber = ADC_OFFSET_NONE;
+    sConfig.Offset = 0;
+    if (HAL_ADC_ConfigChannel(&adc, &sConfig) != HAL_OK)
+    {
+    	Error_Handler();
+    }
+
+    // Restart ADC
+    HAL_ADC_Start(&adc);
+
+}
+
 // Process an incoming packet from the GUI and send the expected response
 void ProcessI2CPacket(float temp, float humidity, float strain, float power)
 {
 	// Read received packet and determine what is being requested
+	if(HAL_I2C_Slave_Receive(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE, SENSING_DELAY) != HAL_OK)
+	{
+		// If no data read, skip processing
+		return;
+	}
 	uint8_t rqType = rxBuffer[0];
 
 	switch(rqType)
@@ -580,7 +636,7 @@ void ProcessI2CPacket(float temp, float humidity, float strain, float power)
 		}
 
 		// Transmit packet data
-		HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE / 2);
+		HAL_I2C_Slave_Transmit(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE / 2, SENSING_DELAY);
 		break;
 
 	case INFO_RQ:
@@ -595,10 +651,27 @@ void ProcessI2CPacket(float temp, float humidity, float strain, float power)
 		// Transmit packet data
 		HAL_I2C_Slave_Transmit_IT(&hi2c1, txBuffer, SLAVE_TX_BUFFER_SIZE);
 		break;
+
+	case RESET:
+		// De-initialize and re-initialize all sensors, reset I2C/SPI comms
+		hx711_power_down(&strainScale);
+		hx711_power_up(&strainScale);
+		HTS221_Init(&humiditySensor, &hspi1);
+	    MX_GPIO_Init();
+	    MX_ADC1_Init();
+	    MX_ADC2_Init();
+	    MX_I2C1_Init();
+	    MX_SPI1_Init();
+		break;
+
+	case E_STOP:
+		// Stop all operations, loop forever until power is cut off
+		while(1);
+		break;
 	}
 
-	// Reset newPacketReceived
-	newPacketReceived = 0;
+//	// Reset newPacketReceived
+//	newPacketReceived = 0;
 	return;
 }
 
@@ -610,7 +683,7 @@ void ProcessI2CPacket(float temp, float humidity, float strain, float power)
 void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, float strainB, float solar_v, float solar_i)
 {
 	// Delay to allow sensors to write values to variables
-	HAL_Delay(100);
+	HAL_Delay(SENSING_DELAY);
 
 	// Thermistor Error Check
 	// When unplugged, thermistors report values of about -48 degrees C
@@ -687,9 +760,9 @@ void SensorErrorCheck(float temp1, float temp2, float humidity, float strainA, f
 void RiskCheck(float temp, float humidity, float strain)
 {
 	// Frozen Pipe Risk check
-	// Conditions based off of that water freezes at or below 0 deg. C
+	// Conditions based off of that water freezes at and below 0 deg. C
 	// And that leaking/bursting pipes increase humidity, about 60% according to EPA
-	if(((temp <= 0) || (humidity >= 0.6f)) && !((errorStatus == ThermistorError) || (errorStatus == HumiditySensorError)))
+	if(((temp <= 0) && (humidity >= 60.0f)) && !((errorStatus == ThermistorError) || (errorStatus == HumiditySensorError)))
 	{
 		riskStatus |= FrozenPipeRisk;
 	}
@@ -718,41 +791,41 @@ void RiskCheck(float temp, float humidity, float strain)
 	}
 }
 
-/**
- * Called when the slave has finished RECEIVING data from master.
- * Re-arm for the next receive, and set a flag for main loop processing.
- */
-void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
-    if (hi2c->Instance == I2C1) {
-        newPacketReceived = 1;
-
-        // Re-arm for next packet
-        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
-    }
-}
-
-/**
- * Called when the slave has finished TRANSMITTING data to master.
- * Re-arm the receiver to listen for the next command.
- */
-void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c) {
-    if (hi2c->Instance == I2C1) {
-        // Re-arm to receive the next request
-        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
-    }
-}
-
-/**
- * Called on I2C error (bus error, arbitration loss, timeout, etc.)
- */
-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
-    if (hi2c->Instance == I2C1) {
-        // Reset and re-arm — common for ARLO or BERR recovery
-        HAL_I2C_DeInit(hi2c);
-        HAL_I2C_Init(hi2c);
-        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
-    }
-}
+///**
+// * Called when the slave has finished RECEIVING data from master.
+// * Re-arm for the next receive, and set a flag for main loop processing.
+// */
+//void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
+//    if (hi2c->Instance == I2C1) {
+//        newPacketReceived = 1;
+//
+//        // Re-arm for next packet
+//        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+//    }
+//}
+//
+///**
+// * Called when the slave has finished TRANSMITTING data to master.
+// * Re-arm the receiver to listen for the next command.
+// */
+//void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+//    if (hi2c->Instance == I2C1) {
+//        // Re-arm to receive the next request
+//        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+//    }
+//}
+//
+///**
+// * Called on I2C error (bus error, arbitration loss, timeout, etc.)
+// */
+//void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+//    if (hi2c->Instance == I2C1) {
+//        // Reset and re-arm — common for ARLO or BERR recovery
+//        HAL_I2C_DeInit(hi2c);
+//        HAL_I2C_Init(hi2c);
+//        HAL_I2C_Slave_Receive_IT(&hi2c1, rxBuffer, SLAVE_RX_BUFFER_SIZE);
+//    }
+//}
 
 /* USER CODE END 4 */
 
@@ -769,10 +842,10 @@ void Error_Handler(void)
   errorStatus = HardFault;
   while (1)
   {
-	  if (newPacketReceived)
-	  	 {
+//	  if (newPacketReceived)
+//	  	 {
 	  		 ProcessI2CPacket(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
-	  	 }
+//	  	 }
   }
   /* USER CODE END Error_Handler_Debug */
 }
