@@ -1,0 +1,12 @@
+../Core/Src/hts221.c:54:20:cs_deassert	0	static
+../Core/Src/hts221.c:127:13:spi_read_regs	24	static
+../Core/Src/hts221.c:172:16:spi_read_reg	16	static
+../Core/Src/hts221.c:186:13:spi_modify_reg	32	static
+../Core/Src/hts221.c:318:6:HTS221_Boot	8	static
+../Core/Src/hts221.c:330:6:HTS221_SetActive	0	static
+../Core/Src/hts221.c:336:6:HTS221_SetDataRate	0	static
+../Core/Src/hts221.c:292:6:HTS221_Init	24	static
+../Core/Src/hts221.c:342:15:HTS221_GetDataRate	8	static
+../Core/Src/hts221.c:347:6:HTS221_DrdyActiveLow	0	static
+../Core/Src/hts221.c:353:6:HTS221_DrdyIntEnabled	0	static
+../Core/Src/hts221.c:359:6:HTS221_Read	32	static

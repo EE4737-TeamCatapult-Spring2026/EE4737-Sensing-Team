@@ -1,0 +1,12 @@
+../Core/Src/hts221.c:54:20:cs_deassert	1
+../Core/Src/hts221.c:127:13:spi_read_regs	4
+../Core/Src/hts221.c:172:16:spi_read_reg	1
+../Core/Src/hts221.c:186:13:spi_modify_reg	2
+../Core/Src/hts221.c:318:6:HTS221_Boot	2
+../Core/Src/hts221.c:330:6:HTS221_SetActive	1
+../Core/Src/hts221.c:336:6:HTS221_SetDataRate	1
+../Core/Src/hts221.c:292:6:HTS221_Init	2
+../Core/Src/hts221.c:342:15:HTS221_GetDataRate	1
+../Core/Src/hts221.c:347:6:HTS221_DrdyActiveLow	1
+../Core/Src/hts221.c:353:6:HTS221_DrdyIntEnabled	1
+../Core/Src/hts221.c:359:6:HTS221_Read	5
